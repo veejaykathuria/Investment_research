@@ -395,6 +395,66 @@ class ChartUtils:
         except Exception as e:
             return None
     
+    def create_comparison_price_chart(self, comparison_data, period_name):
+        """
+        Create a comparison chart for multiple stocks
+        
+        Args:
+            comparison_data (dict): Dictionary with ticker symbols as keys and price data as values
+            period_name (str): Time period name for display
+            
+        Returns:
+            plotly.graph_objects.Figure: Multi-stock comparison chart
+        """
+        try:
+            fig = go.Figure()
+            
+            colors = [self.color_palette['primary'], self.color_palette['secondary'], 
+                     self.color_palette['success'], self.color_palette['danger'], 
+                     self.color_palette['info']]
+            
+            for i, (ticker, data) in enumerate(comparison_data.items()):
+                if not data.empty:
+                    # Normalize to percentage change from first day
+                    normalized_data = ((data['Close'] / data['Close'].iloc[0]) - 1) * 100
+                    
+                    fig.add_trace(
+                        go.Scatter(
+                            x=data.index,
+                            y=normalized_data,
+                            mode='lines',
+                            name=ticker,
+                            line=dict(color=colors[i % len(colors)], width=2),
+                            hovertemplate=f'<b>{ticker}</b><br>' +
+                                        '<b>Date:</b> %{x}<br>' +
+                                        '<b>Change:</b> %{y:.2f}%<extra></extra>'
+                        )
+                    )
+            
+            fig.update_layout(
+                title=f'Stock Price Comparison - {period_name} (% Change)',
+                xaxis_title='Date',
+                yaxis_title='Price Change (%)',
+                template='plotly_white',
+                height=500,
+                hovermode='x unified',
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            # Add horizontal line at 0%
+            fig.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
+            
+            return fig
+            
+        except Exception as e:
+            return None
+    
     def create_metrics_comparison_chart(self, metrics_data, ticker_symbol):
         """
         Create a radar chart for key financial metrics comparison
