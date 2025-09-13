@@ -399,73 +399,91 @@ def get_fcf_elements():
         return pd.DataFrame()
 
 def calculate_fcf_valuation(symbol, assumptions, cash_flow_data):
-    """Calculate FCF-based intrinsic value with element management"""
+    """Calculate FCF-based intrinsic value with enhanced element management and two-step DCF"""
     try:
-        # Get the latest free cash flow
-        if cash_flow_data.empty:
-            return None
+        # Get valuation method
+        valuation_method = assumptions.get('valuation_method', {}).get('value', 'One-Step DCF')
+        
+        # Use total FCF from dynamic table if available
+        total_fcf = assumptions.get('total_fcf', {}).get('value', None)
+        fcf_elements_data = assumptions.get('fcf_elements_data', {}).get('value', [])
+        
+        if total_fcf is not None:
+            # Use calculated FCF from dynamic table
+            fcf_base = total_fcf
+            element_adjustments = []
             
-        # Extract latest FCF (look for various FCF names)
-        fcf_current = None
-        fcf_names = ['Free Cash Flow', 'Operating Cash Flow']
-        
-        for name in fcf_names:
-            if name in cash_flow_data.index:
-                fcf_current = float(cash_flow_data.loc[name].iloc[0])
-                break
-        
-        if fcf_current is None or fcf_current <= 0:
-            return None
-        
-        # Apply selected FCF elements adjustments
-        selected_elements = assumptions.get('selected_elements', {}).get('value', [])
-        fcf_elements = get_fcf_elements()
-        
-        adjusted_fcf = fcf_current
-        element_adjustments = []
-        
-        if not fcf_elements.empty:
-            # Mock element values for demonstration (in real app, these would come from financial data)
-            element_values = {
-                'Operating Cash Flow': 0,  # Already included in base FCF
-                'Capital Expenditures': -1000000000,  # -1B
-                'Acquisitions': -500000000,  # -500M
-                'Asset Sales': 200000000,  # +200M
-                'Working Capital Changes': -100000000,  # -100M
-                'Stock-based Compensation': 300000000,  # +300M
-                'Restructuring Costs': -50000000,  # -50M
-                'Tax Benefits': 150000000  # +150M
-            }
+            # Create adjustments summary from table data with safe key access
+            for elem in fcf_elements_data:
+                try:
+                    element_name = elem.get('Element', 'Unknown Element')
+                    element_value = float(elem.get('Value', 0))
+                    is_addition = elem.get('Addition', True)
+                    
+                    action = "+" if is_addition else "-"
+                    element_adjustments.append(f"{action}{element_value/1e6:.1f}M from {element_name}")
+                except (ValueError, TypeError, KeyError) as e:
+                    element_adjustments.append(f"Invalid element data: {str(e)}")
             
-            for element in selected_elements:
-                matching_rows = fcf_elements[fcf_elements['Element'] == element]
-                if not matching_rows.empty:
-                    row = matching_rows.iloc[0]
-                    value = element_values.get(element, 0)
-                    if row['Addition']:
-                        adjusted_fcf += value
-                        element_adjustments.append(f"+{value/1e6:.0f}M from {element}")
-                    else:
-                        adjusted_fcf -= abs(value)
-                        element_adjustments.append(f"-{abs(value)/1e6:.0f}M from {element}")
+        else:
+            # Fallback to traditional calculation
+            if cash_flow_data.empty:
+                return None
+                
+            # Extract latest FCF
+            fcf_current = None
+            fcf_names = ['Free Cash Flow', 'Operating Cash Flow']
+            
+            for name in fcf_names:
+                if name in cash_flow_data.index:
+                    fcf_current = float(cash_flow_data.loc[name].iloc[0])
+                    break
+            
+            if fcf_current is None or fcf_current <= 0:
+                return None
+            
+            fcf_base = fcf_current
+            element_adjustments = ["Using base FCF from financial statements"]
         
-        # Use adjusted FCF for calculations
-        fcf_base = max(adjusted_fcf, fcf_current * 0.1)  # Ensure positive FCF
+        # Ensure positive FCF
+        if fcf_base <= 0:
+            fcf_base = abs(fcf_base) * 0.1  # Convert to small positive value
         
-        # Default assumptions if not provided
-        growth_rate = assumptions.get('growth_rate', {}).get('value', 0.05)  # 5%
-        discount_rate = assumptions.get('discount_rate', {}).get('value', 0.10)  # 10%
-        terminal_growth = assumptions.get('terminal_growth', {}).get('value', 0.02)  # 2%
+        # Get assumptions
+        discount_rate = assumptions.get('discount_rate', {}).get('value', 0.10)
+        terminal_growth = assumptions.get('terminal_growth', {}).get('value', 0.02)
         projection_years = int(assumptions.get('projection_years', {}).get('value', 5))
         
-        # Project future FCFs
+        # Project future FCFs based on valuation method
         future_fcfs = []
         fcf = fcf_base
         
-        for year in range(1, projection_years + 1):
-            fcf = fcf * (1 + growth_rate)
-            pv_fcf = fcf / ((1 + discount_rate) ** year)
-            future_fcfs.append(pv_fcf)
+        if valuation_method == "One-Step DCF":
+            # Single growth rate for all years
+            growth_rate = assumptions.get('growth_rate', {}).get('value', 0.05)
+            
+            for year in range(1, projection_years + 1):
+                fcf = fcf * (1 + growth_rate)
+                pv_fcf = fcf / ((1 + discount_rate) ** year)
+                future_fcfs.append(pv_fcf)
+                
+        else:  # Two-Step DCF
+            # High growth phase followed by stable growth
+            high_growth_rate = assumptions.get('growth_rate', {}).get('value', 0.08)
+            high_growth_years = int(assumptions.get('high_growth_years', {}).get('value', 3))
+            stable_growth_rate = assumptions.get('stable_growth_rate', {}).get('value', 0.03)
+            
+            # High growth phase
+            for year in range(1, high_growth_years + 1):
+                fcf = fcf * (1 + high_growth_rate)
+                pv_fcf = fcf / ((1 + discount_rate) ** year)
+                future_fcfs.append(pv_fcf)
+            
+            # Stable growth phase
+            for year in range(high_growth_years + 1, projection_years + 1):
+                fcf = fcf * (1 + stable_growth_rate)
+                pv_fcf = fcf / ((1 + discount_rate) ** year)
+                future_fcfs.append(pv_fcf)
         
         # Terminal value
         terminal_fcf = fcf * (1 + terminal_growth)
@@ -476,14 +494,15 @@ def calculate_fcf_valuation(symbol, assumptions, cash_flow_data):
         enterprise_value = sum(future_fcfs) + pv_terminal_value
         
         # Get shares outstanding
-        shares_outstanding = assumptions.get('shares_outstanding', {}).get('value', 1000000000)  # Default 1B shares
+        shares_outstanding = assumptions.get('shares_outstanding', {}).get('value', 1000000000)
         
         # Calculate intrinsic value per share
         intrinsic_value = enterprise_value / shares_outstanding
         
         return {
-            'current_fcf': fcf_current,
-            'adjusted_fcf': adjusted_fcf,
+            'valuation_method': valuation_method,
+            'current_fcf': fcf_base,
+            'adjusted_fcf': fcf_base,
             'element_adjustments': element_adjustments,
             'projected_fcfs': future_fcfs,
             'terminal_value': terminal_value,
@@ -838,46 +857,190 @@ def main():
             with val_tab1:
                 st.write("**Free Cash Flow (FCF) Valuation Model**")
                 
-                # FCF Assumptions Input
-                col1, col2 = st.columns(2)
+                # Valuation method selection
+                col1, col2, col3 = st.columns([1, 1, 2])
                 
                 with col1:
-                    st.write("**Key Assumptions**")
-                    fcf_growth_rate = st.number_input("FCF Growth Rate (%)", value=5.0, min_value=-10.0, max_value=50.0) / 100
-                    discount_rate = st.number_input("Discount Rate (WACC) (%)", value=10.0, min_value=1.0, max_value=20.0) / 100
-                    terminal_growth = st.number_input("Terminal Growth Rate (%)", value=2.0, min_value=0.0, max_value=5.0) / 100
-                    projection_years = st.number_input("Projection Years", value=5, min_value=3, max_value=10)
+                    valuation_method = st.radio(
+                        "Valuation Method",
+                        ["One-Step DCF", "Two-Step DCF"],
+                        help="One-step: Single growth rate for all years\nTwo-step: High growth phase followed by stable growth"
+                    )
                 
                 with col2:
-                    st.write("**Company-Specific Data**")
+                    st.write("**Key Assumptions**")
+                    discount_rate = st.number_input("Discount Rate (WACC) (%)", value=10.0, min_value=1.0, max_value=20.0) / 100
+                    projection_years = st.number_input("Projection Years", value=5, min_value=3, max_value=10)
                     shares_outstanding = st.number_input("Shares Outstanding (millions)", value=1000.0, min_value=1.0) * 1e6
-                    debt_amount = st.number_input("Net Debt (millions $)", value=0.0) * 1e6
-                    cash_amount = st.number_input("Cash & Equivalents (millions $)", value=0.0) * 1e6
                 
-                # FCF Element Management
-                st.write("**FCF Calculation Elements**")
-                fcf_elements = get_fcf_elements()
+                with col3:
+                    if valuation_method == "One-Step DCF":
+                        st.write("**One-Step Growth Parameters**")
+                        fcf_growth_rate = st.number_input("FCF Growth Rate (%)", value=5.0, min_value=-10.0, max_value=50.0) / 100
+                        terminal_growth = st.number_input("Terminal Growth Rate (%)", value=2.0, min_value=0.0, max_value=5.0) / 100
+                        high_growth_years = projection_years
+                        stable_growth_rate = fcf_growth_rate
+                    else:  # Two-Step DCF
+                        st.write("**Two-Step Growth Parameters**")
+                        fcf_growth_rate = st.number_input("High Growth Rate (%)", value=8.0, min_value=-10.0, max_value=50.0) / 100
+                        high_growth_years = st.number_input("High Growth Years", value=3, min_value=1, max_value=projection_years-1)
+                        stable_growth_rate = st.number_input("Stable Growth Rate (%)", value=3.0, min_value=-5.0, max_value=15.0) / 100
+                        terminal_growth = st.number_input("Terminal Growth Rate (%)", value=2.0, min_value=0.0, max_value=5.0) / 100
+
+                st.markdown("---")
                 
-                if not fcf_elements.empty:
-                    # Allow users to enable/disable elements
-                    selected_elements = []
-                    for idx, row in fcf_elements.iterrows():
-                        if st.checkbox(f"{row['Element']}", value=row['Active'], key=f"fcf_element_{row['ID']}"):
-                            selected_elements.append(row['Element'])
+                # Dynamic FCF Calculation Table
+                st.write("**📊 FCF Calculation & Projections Table**")
+                
+                # Initialize session state for FCF table if not exists
+                if 'fcf_elements_data' not in st.session_state:
+                    fcf_elements = get_fcf_elements()
+                    if not fcf_elements.empty:
+                        st.session_state.fcf_elements_data = fcf_elements.to_dict('records')
+                    else:
+                        # Default FCF elements if database unavailable
+                        st.session_state.fcf_elements_data = [
+                            {'ID': 1, 'Element': 'Operating Cash Flow', 'Description': 'Cash from operations', 'Addition': True, 'Active': True, 'Order': 1, 'Value': 5000000000},
+                            {'ID': 2, 'Element': 'Capital Expenditures', 'Description': 'Investment in PP&E', 'Addition': False, 'Active': True, 'Order': 2, 'Value': 1000000000},
+                            {'ID': 3, 'Element': 'Asset Sales', 'Description': 'Cash from asset sales', 'Addition': True, 'Active': False, 'Order': 3, 'Value': 200000000},
+                            {'ID': 4, 'Element': 'Working Capital Changes', 'Description': 'Changes in working capital', 'Addition': False, 'Active': True, 'Order': 4, 'Value': 100000000}
+                        ]
+                
+                # Create dynamic table with editable cells
+                fcf_data = st.session_state.fcf_elements_data.copy()
+                
+                # Table header
+                header_cols = st.columns([0.5, 3, 2, 1, 1, 1.5, 1])
+                with header_cols[0]:
+                    st.write("**Include**")
+                with header_cols[1]:
+                    st.write("**FCF Element**")
+                with header_cols[2]:
+                    st.write("**Description**")
+                with header_cols[3]:
+                    st.write("**Type**")
+                with header_cols[4]:
+                    st.write("**Current Value ($M)**")
+                with header_cols[5]:
+                    st.write("**Growth Rate (%)**")
+                with header_cols[6]:
+                    st.write("**Actions**")
+                
+                # Display/edit each row
+                for i, row in enumerate(fcf_data):
+                    cols = st.columns([0.5, 3, 2, 1, 1, 1.5, 1])
+                    
+                    with cols[0]:
+                        row['Active'] = st.checkbox("", value=row.get('Active', True), key=f"active_{i}")
+                    
+                    with cols[1]:
+                        row['Element'] = st.text_input("", value=row.get('Element', ''), key=f"element_{i}", label_visibility="collapsed")
+                    
+                    with cols[2]:
+                        row['Description'] = st.text_input("", value=row.get('Description', ''), key=f"desc_{i}", label_visibility="collapsed")
+                    
+                    with cols[3]:
+                        row['Addition'] = st.selectbox("", [True, False], index=0 if row.get('Addition', True) else 1, 
+                                                     format_func=lambda x: "Add" if x else "Subtract", key=f"type_{i}", label_visibility="collapsed")
+                    
+                    with cols[4]:
+                        row['Value'] = st.number_input("", value=float(row.get('Value', 0))/1e6, key=f"value_{i}", 
+                                                     min_value=-10000.0, max_value=50000.0, step=100.0, format="%.1f", label_visibility="collapsed") * 1e6
+                    
+                    with cols[5]:
+                        row['GrowthRate'] = st.number_input("", value=float(row.get('GrowthRate', 5.0)), key=f"growth_{i}", 
+                                                          min_value=-20.0, max_value=50.0, step=0.5, format="%.1f", label_visibility="collapsed") / 100
+                    
+                    with cols[6]:
+                        if st.button("🗑️", key=f"delete_{i}", help="Delete row"):
+                            fcf_data.pop(i)
+                            st.session_state.fcf_elements_data = fcf_data
+                            st.rerun()
+                
+                # Update session state
+                st.session_state.fcf_elements_data = fcf_data
+                
+                # Add new row button
+                col1, col2, col3 = st.columns([1, 1, 3])
+                with col1:
+                    if st.button("➕ Add FCF Element"):
+                        new_element = {
+                            'ID': len(fcf_data) + 1,
+                            'Element': 'New Element',
+                            'Description': 'Description',
+                            'Addition': True,
+                            'Active': True,
+                            'Order': len(fcf_data) + 1,
+                            'Value': 0,
+                            'GrowthRate': 5.0
+                        }
+                        st.session_state.fcf_elements_data.append(new_element)
+                        st.rerun()
+                
+                with col2:
+                    if st.button("🔄 Reset to Defaults"):
+                        del st.session_state.fcf_elements_data
+                        st.rerun()
+                
+                # Calculate total current FCF from active elements
+                total_fcf = 0
+                active_elements = [elem for elem in fcf_data if elem['Active']]
+                for elem in active_elements:
+                    if elem['Addition']:
+                        total_fcf += elem['Value']
+                    else:
+                        total_fcf -= elem['Value']
+                
+                st.info(f"**Current Total FCF: ${total_fcf/1e6:.1f}M** (from {len(active_elements)} active elements)")
+                
+                selected_elements = [elem['Element'] for elem in active_elements]
                 
                 # Calculate FCF Valuation
                 if st.button("🔄 Calculate FCF Valuation", type="primary"):
                     cash_flow = analyzer.get_cash_flow()
                     
-                    # Prepare assumptions including selected elements
+                    # Prepare assumptions including selected elements and valuation method
                     fcf_assumptions = {
+                        'valuation_method': {'value': valuation_method, 'type': 'method'},
                         'growth_rate': {'value': fcf_growth_rate, 'type': 'growth_rate'},
                         'discount_rate': {'value': discount_rate, 'type': 'discount_rate'},
                         'terminal_growth': {'value': terminal_growth, 'type': 'terminal_value'},
                         'projection_years': {'value': projection_years, 'type': 'projection'},
                         'shares_outstanding': {'value': shares_outstanding, 'type': 'shares'},
-                        'selected_elements': {'value': selected_elements, 'type': 'fcf_elements'}
+                        'selected_elements': {'value': selected_elements, 'type': 'fcf_elements'},
+                        'fcf_elements_data': {'value': active_elements, 'type': 'fcf_data'},
+                        'total_fcf': {'value': total_fcf, 'type': 'base_fcf'}
                     }
+                    
+                    # Add two-step specific parameters if applicable
+                    if valuation_method == "Two-Step DCF":
+                        fcf_assumptions.update({
+                            'high_growth_years': {'value': high_growth_years, 'type': 'high_growth_period'},
+                            'stable_growth_rate': {'value': stable_growth_rate, 'type': 'stable_growth'}
+                        })
+                    
+                    # Validation checks
+                    validation_errors = []
+                    
+                    if discount_rate <= terminal_growth:
+                        validation_errors.append("Discount rate must be greater than terminal growth rate")
+                    
+                    if shares_outstanding <= 0:
+                        validation_errors.append("Shares outstanding must be greater than zero")
+                    
+                    if projection_years < 1:
+                        validation_errors.append("Projection years must be at least 1")
+                    
+                    if total_fcf <= 0:
+                        validation_errors.append("Total FCF must be positive for meaningful valuation")
+                    
+                    if valuation_method == "Two-Step DCF" and high_growth_years >= projection_years:
+                        validation_errors.append("High growth years must be less than total projection years")
+                    
+                    if validation_errors:
+                        for error in validation_errors:
+                            st.error(f"❌ {error}")
+                        st.stop()
                     
                     # Save assumptions to database
                     save_fcf_assumptions(ticker_input, fcf_assumptions)
@@ -893,36 +1056,85 @@ def main():
                         if save_valuation_results(ticker_input, 'FCF', fcf_result, current_price):
                             st.info("💾 Valuation results saved to database")
                         
-                        # Display results
-                        col1, col2, col3 = st.columns(3)
+                        # Display valuation method and key results
+                        st.info(f"**Valuation Method Used: {fcf_result.get('valuation_method', 'N/A')}**")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
                         
                         with col1:
-                            st.metric("Current FCF", f"${fcf_result['current_fcf']/1e6:.1f}M")
+                            st.metric("Base FCF", f"${fcf_result['current_fcf']/1e6:.1f}M")
                         
                         with col2:
-                            st.metric("Adjusted FCF", f"${fcf_result['adjusted_fcf']/1e6:.1f}M")
+                            st.metric("Enterprise Value", f"${fcf_result['enterprise_value']/1e6:.1f}M")
                         
                         with col3:
                             upside = ((fcf_result['intrinsic_value'] - current_price) / current_price) * 100
                             st.metric("Intrinsic Value", f"${fcf_result['intrinsic_value']:.2f}", f"{upside:.1f}%")
                         
-                        # Show FCF element adjustments
+                        with col4:
+                            st.metric("Current Price", f"${current_price:.2f}")
+                        
+                        # Show FCF element breakdown
                         if fcf_result.get('element_adjustments'):
-                            st.write("**FCF Element Adjustments:**")
-                            for adjustment in fcf_result['element_adjustments']:
-                                st.write(f"• {adjustment}")
+                            st.write("**📊 FCF Element Breakdown:**")
+                            elements_col1, elements_col2 = st.columns(2)
+                            
+                            with elements_col1:
+                                for i, adjustment in enumerate(fcf_result['element_adjustments']):
+                                    if i % 2 == 0:
+                                        st.write(f"• {adjustment}")
+                            
+                            with elements_col2:
+                                for i, adjustment in enumerate(fcf_result['element_adjustments']):
+                                    if i % 2 == 1:
+                                        st.write(f"• {adjustment}")
                         
-                        # Show enterprise value breakdown
-                        st.metric("Enterprise Value", f"${fcf_result['enterprise_value']/1e6:.1f}M")
+                        # Enhanced projection table
+                        st.write("**📈 Year-by-Year FCF Projections**")
                         
-                        # Show projected FCFs
-                        st.write("**Projected Free Cash Flows (Present Value)**")
                         years = list(range(1, len(fcf_result['projected_fcfs']) + 1))
-                        fcf_df = pd.DataFrame({
-                            'Year': years,
-                            'PV of FCF ($M)': [fcf/1e6 for fcf in fcf_result['projected_fcfs']]
+                        base_fcf = fcf_result['current_fcf']
+                        valuation_method = fcf_result.get('valuation_method', 'N/A')
+                        
+                        # Create detailed projection table
+                        proj_data = []
+                        cumulative_pv = 0
+                        
+                        for i, year in enumerate(years):
+                            pv_fcf = fcf_result['projected_fcfs'][i]
+                            cumulative_pv += pv_fcf
+                            
+                            # Calculate growth rate used for this year
+                            if valuation_method == "Two-Step DCF":
+                                high_growth_years = fcf_assumptions.get('high_growth_years', {}).get('value', 3)
+                                if year <= high_growth_years:
+                                    growth_rate = fcf_assumptions.get('growth_rate', {}).get('value', 0.08)
+                                else:
+                                    growth_rate = fcf_assumptions.get('stable_growth_rate', {}).get('value', 0.03)
+                            else:
+                                growth_rate = fcf_assumptions.get('growth_rate', {}).get('value', 0.05)
+                            
+                            proj_data.append({
+                                'Year': year,
+                                'Growth Rate': f"{growth_rate:.1%}",
+                                'Future FCF ($M)': f"{(base_fcf * ((1 + growth_rate) ** year))/1e6:.1f}",
+                                'PV of FCF ($M)': f"{pv_fcf/1e6:.1f}",
+                                'Cumulative PV ($M)': f"{cumulative_pv/1e6:.1f}"
+                            })
+                        
+                        # Add terminal value row
+                        terminal_pv = fcf_result['pv_terminal_value']
+                        cumulative_pv += terminal_pv
+                        proj_data.append({
+                            'Year': 'Terminal',
+                            'Growth Rate': f"{fcf_assumptions.get('terminal_growth', {}).get('value', 0.02):.1%}",
+                            'Future FCF ($M)': 'Perpetual',
+                            'PV of FCF ($M)': f"{terminal_pv/1e6:.1f}",
+                            'Cumulative PV ($M)': f"{cumulative_pv/1e6:.1f}"
                         })
-                        st.dataframe(fcf_df, hide_index=True)
+                        
+                        proj_df = pd.DataFrame(proj_data)
+                        st.dataframe(proj_df, hide_index=True)
                         
                         # Chart of FCF projections
                         fcf_chart = go.Figure()
