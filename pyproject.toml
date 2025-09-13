@@ -7,6 +7,7 @@ dependencies = [
     "numpy>=2.3.3",
     "pandas>=2.3.2",
     "plotly>=6.3.0",
+    "psycopg2-binary>=2.9.10",
     "streamlit>=1.49.1",
     "yfinance>=0.2.65",
 ]
